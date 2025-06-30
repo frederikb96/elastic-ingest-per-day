@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Compute average primary-store bytes per document for an Elasticsearch cluster.
-
 Usage:
-    python elastic_ingest_per_day.py https://es.example.com:9200 myuser mypassword
+    URL=https://es.example.com:9200
+    USER=myuser
+    PASS=mypassword
+    python elastic_ingest_per_day.py $URL $USER $PASS
 """
 
 import argparse
@@ -12,6 +13,9 @@ import sys
 from typing import Tuple
 
 import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 def get_primary_store_bytes(endpoint: str, auth: Tuple[str, str]) -> int:
@@ -44,29 +48,72 @@ def get_total_docs(endpoint: str, auth: Tuple[str, str]) -> int:
     return resp.json()["_all"]["primaries"]["docs"]["count"]
 
 
+def get_docs_last_7d(
+    endpoint: str,
+    auth: Tuple[str, str],
+    timestamp_field: str = "@timestamp",
+    index_pattern: str = "_all",
+) -> int:
+    """
+    Count documents with `timestamp_field` in the range:
+        (now-7d, now) – *rounded to day boundaries*
+    Equivalent Kibana KQL:  @timestamp >= now-7d/d and @timestamp <  now/d
+    """
+    url = f"{endpoint.rstrip('/')}/{index_pattern}/_count"
+    query = {
+        "query": {
+            "range": {
+                timestamp_field: {
+                    "gte": "now-7d/d",
+                    "lt": "now/d",
+                }
+            }
+        }
+    }
+    resp = requests.post(
+        url, json=query, params={"filter_path": "count"}, auth=auth, timeout=30, verify=False
+    )
+    resp.raise_for_status()
+    return resp.json()["count"]
+
+
+# --------------------------------------------------------------------------- #
+# Main                                                                        #
+# --------------------------------------------------------------------------- #
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Calculate average bytes per document in an Elasticsearch cluster"
+        description="Elasticsearch ingest statistics: bytes, docs, averages"
     )
-    parser.add_argument("endpoint", help="Cluster endpoint, e.g. https://es.example.com:9200")
+    parser.add_argument("endpoint", help="Elasticsearch endpoint, e.g. https://es.example.com:9200")
     parser.add_argument("username", help="Basic-auth username")
     parser.add_argument("password", help="Basic-auth password")
     args = parser.parse_args()
-
     auth = (args.username, args.password)
 
     try:
+        # cluster-wide store + doc metrics
         total_bytes = get_primary_store_bytes(args.endpoint, auth)
         total_docs = get_total_docs(args.endpoint, auth)
+        avg_bytes_per_doc = total_bytes / total_docs if total_docs else 0
 
-        if total_docs == 0:
-            print("Total document count is zero—cannot compute average.")
-            sys.exit(1)
+        # past 7 days metrics
+        docs_7d = get_docs_last_7d(args.endpoint, auth)
+        avg_docs_per_day_7d = docs_7d / 7
+        avg_bytes_per_day_7d = avg_docs_per_day_7d * avg_bytes_per_doc
 
-        avg_bytes = total_bytes / total_docs
-        print(f"Primary-store size : {total_bytes:,} bytes")
-        print(f"Document count     : {total_docs:,}")
-        print(f"Average bytes/doc  : {avg_bytes:,.2f}")
+        # ────────────────────────────── output ───────────────────────────── #
+        print()
+        print("1) Overall cluster statistics:")
+        print(f"Total primary storage     : {(total_bytes / (1024**3)):,.2f} GiB")
+        print(f"Total document count      : {total_docs:,}")
+        print(f"Average bytes per doc     : {avg_bytes_per_doc:,.2f} Bytes")
+        print()
+        print("2) Last 7 days statistics:")
+        print(f"  Documents ingested      : {docs_7d:,}")
+        print(f"  Avg docs per day        : {avg_docs_per_day_7d:,.2f}")
+        print(f"  Avg ingest per day      : {(avg_bytes_per_day_7d / (1024**3)):,.2f} GiB")
+        print()
+
     except requests.exceptions.RequestException as exc:
         print(f"HTTP error: {exc}", file=sys.stderr)
         sys.exit(2)
