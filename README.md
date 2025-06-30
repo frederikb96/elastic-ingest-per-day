@@ -23,7 +23,7 @@ URL=https://es.example.com:9200
 USER=myuser
 PASS=mypassword
 
-python elastic_ingest_per_day.py $URL $USER $PASS
+python3 elastic_ingest_per_day.py $URL $USER $PASS
 ```
 
 **Note:** Self-signed SSL certificates are supported — certificate validation is disabled by default.
@@ -35,7 +35,7 @@ python elastic_ingest_per_day.py $URL $USER $PASS
 Install via:
 
 ```
-pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
 ## 📋 Example Output
