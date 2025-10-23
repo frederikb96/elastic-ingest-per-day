@@ -19,11 +19,11 @@ It then computes:
 Example:
 
 ```
-URL=https://es.example.com:9200
-USER=myuser
-PASS=mypassword
+ES_URL=https://es.example.com:9200
+ES_USER=myuser
+ES_PASS=mypassword
 
-python3 elastic_ingest_per_day.py $URL $USER $PASS
+python3 elastic_ingest_per_day.py $ES_URL $ES_USER $ES_PASS
 ```
 
 **Note:** Self-signed SSL certificates are supported — certificate validation is disabled by default.
