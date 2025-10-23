@@ -39,6 +39,14 @@ SSH_PASS=sshpassword
 SSH_KEY=/path/to/private/key
 ```
 
+To analyze only specific indices matching a pattern:
+
+```bash
+# Index Pattern Filter (optional)
+INDEX_PATTERN=logs-endpoint*
+# If not set or empty, analyzes all indices in the cluster
+```
+
 ### Run the Script
 
 ```bash

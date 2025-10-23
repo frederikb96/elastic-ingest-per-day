@@ -19,6 +19,10 @@ Configuration:
     # OR
     SSH_KEY=/path/to/key
 
+    # Optional (to filter by index pattern)
+    INDEX_PATTERN=logs-endpoint*
+    # If not set or empty, analyzes all indices
+
 Usage:
     python3 elastic_ingest_per_day.py
 """
@@ -40,9 +44,14 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
 
-def get_primary_store_bytes(endpoint: str, auth: Tuple[str, str]) -> int:
+def get_primary_store_bytes(endpoint: str, auth: Tuple[str, str], index_pattern: Optional[str] = None) -> int:
     """Sum the store size of all primary shards (bytes)."""
-    url = f"{endpoint.rstrip('/')}/_cat/shards"
+    # Build URL with optional index pattern
+    if index_pattern:
+        url = f"{endpoint.rstrip('/')}/_cat/shards/{index_pattern}"
+    else:
+        url = f"{endpoint.rstrip('/')}/_cat/shards"
+
     params = {
         "bytes": "b",  # return raw bytes, no units
         "format": "json",  # JSON so we can parse reliably
@@ -61,9 +70,14 @@ def get_primary_store_bytes(endpoint: str, auth: Tuple[str, str]) -> int:
     return total
 
 
-def get_total_docs(endpoint: str, auth: Tuple[str, str]) -> int:
+def get_total_docs(endpoint: str, auth: Tuple[str, str], index_pattern: Optional[str] = None) -> int:
     """Return total document count from all primary shards."""
-    url = f"{endpoint.rstrip('/')}/_stats"
+    # Build URL with optional index pattern
+    if index_pattern:
+        url = f"{endpoint.rstrip('/')}/{index_pattern}/_stats"
+    else:
+        url = f"{endpoint.rstrip('/')}/_stats"
+
     params = {"filter_path": "_all.primaries.docs.count"}
     resp = requests.get(url, params=params, auth=auth, timeout=20, verify=False)
     resp.raise_for_status()
@@ -163,6 +177,11 @@ def main() -> None:
     ssh_host = os.getenv('SSH_HOST')
     ssh_pass = os.getenv('SSH_PASS')
     ssh_key = os.getenv('SSH_KEY')
+    index_pattern = os.getenv('INDEX_PATTERN')  # Optional: filter to specific indices
+
+    # Normalize empty string to None for index_pattern
+    if index_pattern and not index_pattern.strip():
+        index_pattern = None
 
     # Validate required Elasticsearch variables
     if not es_url or not es_user or not es_pass:
@@ -213,18 +232,21 @@ def main() -> None:
             # Modify endpoint to use tunnel
             endpoint = f"{parsed.scheme}://localhost:{local_port}"
 
-        # cluster-wide store + doc metrics
-        total_bytes = get_primary_store_bytes(endpoint, auth)
-        total_docs = get_total_docs(endpoint, auth)
+        # cluster-wide store + doc metrics (optionally filtered by index pattern)
+        total_bytes = get_primary_store_bytes(endpoint, auth, index_pattern)
+        total_docs = get_total_docs(endpoint, auth, index_pattern)
         avg_bytes_per_doc = total_bytes / total_docs if total_docs else 0
 
-        # past 7 days metrics
-        docs_7d = get_docs_last_7d(endpoint, auth)
+        # past 7 days metrics (optionally filtered by index pattern)
+        docs_7d = get_docs_last_7d(endpoint, auth, index_pattern=index_pattern or "_all")
         avg_docs_per_day_7d = docs_7d / 7
         avg_bytes_per_day_7d = avg_docs_per_day_7d * avg_bytes_per_doc
 
         # ────────────────────────────── output ───────────────────────────── #
         print()
+        if index_pattern:
+            print(f"Index pattern: {index_pattern}")
+            print()
         print("1) Overall cluster statistics:")
         print(f"Total primary storage     : {(total_bytes / (1024**3)):,.2f} GiB")
         print(f"Total document count      : {total_docs:,}")
