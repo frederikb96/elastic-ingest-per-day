@@ -16,25 +16,61 @@ It then computes:
 
 ## 🛠️ Usage
 
-Example:
+### Configuration
 
-```
+Create a `.env` file with your Elasticsearch configuration:
+
+```bash
+# Elasticsearch connection (required)
 ES_URL=https://es.example.com:9200
 ES_USER=myuser
 ES_PASS=mypassword
-
-python3 elastic_ingest_per_day.py $ES_URL $ES_USER $ES_PASS
 ```
+
+For clusters behind an SSH jumphost, add SSH configuration:
+
+```bash
+# SSH Jumphost (optional)
+SSH_USER=sshuser
+SSH_HOST=jumphost.example.com
+SSH_PASS=sshpassword
+
+# OR use SSH key instead of password
+SSH_KEY=/path/to/private/key
+```
+
+### Run the Script
+
+```bash
+python3 elastic_ingest_per_day.py
+```
+
+The script will automatically:
+- Load configuration from `.env` file
+- Establish SSH tunnel if SSH variables are set
+- Query Elasticsearch for statistics
+- Calculate and display daily ingest metrics
 
 **Note:** Self-signed SSL certificates are supported — certificate validation is disabled by default.
 
 ## 📦 Requirements
 
-* One dependency: `requests`
+* `requests` - HTTP client for Elasticsearch API
+* `paramiko` - SSH protocol library
+* `sshtunnel` - SSH tunneling support for jumphost connections
+* `python-dotenv` - .env file loading
 
 Install via:
 
+```bash
+pip3 install -r requirements.txt
 ```
+
+Or using a virtual environment (recommended):
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip3 install -r requirements.txt
 ```
 

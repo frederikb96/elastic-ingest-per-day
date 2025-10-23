@@ -1,1 +1,4 @@
 requests
+paramiko>=3.3.1,<4.0.0
+sshtunnel>=0.4.0
+python-dotenv>=1.0.0
