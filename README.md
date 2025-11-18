@@ -4,15 +4,15 @@ A simple Python script to estimate **daily ingest volume in Elasticsearch**, bas
 
 It queries:
 
-* the total **primary store size** (in bytes),
-* the **total document count**,
-* and how many documents were ingested over the **last 7 full days**.
+- the total **primary store size** (in bytes),
+- the **total document count**,
+- and how many documents were ingested over a **configurable time window** (default: 7 days).
 
 It then computes:
 
-* the average document size (bytes/doc),
-* the average number of documents per day,
-* and the average ingest volume per day in GiB.
+- the average document size (bytes/doc),
+- the average number of documents per day,
+- and the average ingest volume per day in GiB.
 
 ## 🛠️ Usage
 
@@ -21,10 +21,19 @@ It then computes:
 Create a `.env` file with your Elasticsearch configuration:
 
 ```bash
-# Elasticsearch connection (required)
+# Elasticsearch URL (required)
 ES_URL=https://es.example.com:9200
+
+# Authentication (choose one method)
+# Method 1: Basic authentication
 ES_USER=myuser
 ES_PASS=mypassword
+
+# Method 2: API key authentication
+ES_API_KEY=your_base64_encoded_api_key
+
+# Time window for averaging (optional, default: 7)
+DAYS_TO_AVERAGE=7  # Valid range: 1-365
 ```
 
 For clusters behind an SSH jumphost, add SSH configuration:
@@ -84,6 +93,8 @@ pip3 install -r requirements.txt
 
 ## 📋 Example Output
 
+With default configuration (7 days):
+
 ```
 1) Overall cluster statistics:
 Total primary storage     : 82.25 GiB
@@ -93,5 +104,14 @@ Average bytes per doc     : 473.25 Bytes
 2) Last 7 days statistics:
   Documents ingested      : 122,196,371
   Avg docs per day        : 17,456,624.43
+  Avg ingest per day      : 7.69 GiB
+```
+
+With `DAYS_TO_AVERAGE=30`:
+
+```
+2) Last 30 days statistics:
+  Documents ingested      : 523,698,450
+  Avg docs per day        : 17,456,615.00
   Avg ingest per day      : 7.69 GiB
 ```
