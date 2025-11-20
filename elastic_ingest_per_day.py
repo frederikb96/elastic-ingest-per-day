@@ -31,6 +31,17 @@ Configuration:
     INDEX_PATTERN=logs-endpoint*
     # If not set or empty, analyzes all indices
 
+    # Optional - Ingest pipeline byte tracking (network-level measurement)
+    TRACK_INGEST_BYTES=true
+    # Requires data flowing through ingest pipelines
+    # Stores snapshots in 'ingest-tracking-snapshots' index
+    # NOTE: First run only stores snapshot, second run calculates rate
+
+    INGEST_LOOKBACK_DAYS=7
+    # When set: uses snapshot closest to N days ago for calculation
+    # When 0 or not set: uses most recent snapshot (default)
+    # Valid range: 0-365
+
 Usage:
     python3 elastic_ingest_per_day.py
 """
@@ -38,7 +49,8 @@ Usage:
 import os
 import re
 import sys
-from typing import Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Tuple, Dict, List, Any
 from urllib.parse import urlparse
 
 import requests
@@ -134,6 +146,332 @@ def get_docs_last_nd(
 
 
 # --------------------------------------------------------------------------- #
+# Ingest Pipeline Byte Tracking                                               #
+# --------------------------------------------------------------------------- #
+INDEX_NAME = "ingest-tracking-snapshots"
+
+
+def ensure_ingest_tracking_index(
+    endpoint: str,
+    auth: Optional[Tuple[str, str]] = None,
+    headers: Optional[dict] = None,
+) -> None:
+    """Create ingest tracking index if it doesn't exist."""
+    url = f"{endpoint.rstrip('/')}/{INDEX_NAME}"
+
+    # Check if index exists
+    resp = requests.head(url, auth=auth, headers=headers, verify=False, timeout=10)
+    if resp.status_code == 200:
+        return  # Index exists
+
+    # Create index with mappings
+    mappings = {
+        "mappings": {
+            "properties": {
+                "timestamp": {"type": "date"},
+                "node_id": {"type": "keyword"},
+                "node_name": {"type": "keyword"},
+                "ingest_bytes": {"type": "long"}
+            }
+        }
+    }
+
+    resp = requests.put(url, json=mappings, auth=auth, headers=headers, verify=False, timeout=10)
+    resp.raise_for_status()
+
+
+def get_current_ingest_stats(
+    endpoint: str,
+    auth: Optional[Tuple[str, str]] = None,
+    headers: Optional[dict] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Query current ingest byte counters from all nodes.
+
+    Sums ingested_as_first_pipeline_in_bytes across all pipelines per node.
+    This represents bytes received by Elasticsearch before any processing.
+    """
+    url = f"{endpoint.rstrip('/')}/_nodes/stats/ingest"
+    resp = requests.get(url, auth=auth, headers=headers, verify=False, timeout=20)
+    resp.raise_for_status()
+
+    current_time = datetime.now(timezone.utc)
+    stats = {}
+
+    response_data = resp.json()
+
+    if 'nodes' not in response_data:
+        return stats
+
+    for node_id, node_data in response_data['nodes'].items():
+        pipelines = node_data.get('ingest', {}).get('pipelines', {})
+
+        if not pipelines:
+            continue
+
+        # Sum ingested bytes across all pipelines
+        total_ingested_bytes = 0
+        for pipeline_name, pipeline_data in pipelines.items():
+            ingested_bytes = pipeline_data.get('ingested_as_first_pipeline_in_bytes', 0)
+            total_ingested_bytes += ingested_bytes
+
+        if total_ingested_bytes == 0:
+            continue
+
+        stats[node_id] = {
+            "name": node_data['name'],
+            "bytes": total_ingested_bytes,
+            "timestamp": current_time
+        }
+
+    return stats
+
+
+def store_ingest_snapshots(
+    endpoint: str,
+    auth: Optional[Tuple[str, str]] = None,
+    headers: Optional[dict] = None,
+    snapshots: Dict[str, Dict[str, Any]] = None,
+) -> None:
+    """Store current snapshots in tracking index."""
+    if not snapshots:
+        return
+
+    # Use refresh=wait_for to make documents immediately searchable
+    url = f"{endpoint.rstrip('/')}/{INDEX_NAME}/_bulk?refresh=wait_for"
+
+    # Build bulk request
+    bulk_lines = []
+    for node_id, data in snapshots.items():
+        action = {"index": {}}
+        doc = {
+            "timestamp": data['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
+            "node_id": node_id,
+            "node_name": data['name'],
+            "ingest_bytes": data['bytes']
+        }
+        bulk_lines.append(requests.compat.json.dumps(action))
+        bulk_lines.append(requests.compat.json.dumps(doc))
+
+    bulk_body = "\n".join(bulk_lines) + "\n"
+
+    resp = requests.post(
+        url,
+        data=bulk_body,
+        headers={**({'Content-Type': 'application/x-ndjson'}), **(headers or {})},
+        auth=auth,
+        verify=False,
+        timeout=20
+    )
+
+    # Check for errors in bulk response
+    bulk_result = resp.json()
+    if bulk_result.get('errors'):
+        raise Exception(f"Bulk indexing failed: {bulk_result['items'][0]['index']['error']['reason']}")
+
+    resp.raise_for_status()
+
+
+def get_historical_snapshots(
+    endpoint: str,
+    auth: Optional[Tuple[str, str]] = None,
+    headers: Optional[dict] = None,
+    lookback_days: int = 0,
+) -> Dict[str, Dict[str, Any]]:
+    """Retrieve historical snapshots for comparison."""
+    url = f"{endpoint.rstrip('/')}/{INDEX_NAME}/_search"
+
+    # Query all snapshots
+    query = {
+        "size": 10000,
+        "sort": [{"timestamp": "desc"}],
+        "query": {"match_all": {}}
+    }
+
+    resp = requests.post(url, json=query, auth=auth, headers=headers, verify=False, timeout=20)
+    resp.raise_for_status()
+
+    hits = resp.json().get('hits', {}).get('hits', [])
+
+    if not hits:
+        return {}
+
+    # Group snapshots by node
+    snapshots_by_node: Dict[str, List[Dict]] = {}
+    for hit in hits:
+        source = hit['_source']
+        node_id = source['node_id']
+        timestamp = datetime.fromisoformat(source['timestamp'].replace('Z', '+00:00'))
+
+        if node_id not in snapshots_by_node:
+            snapshots_by_node[node_id] = []
+
+        snapshots_by_node[node_id].append({
+            "timestamp": timestamp,
+            "bytes": source['ingest_bytes'],
+            "name": source.get('node_name', node_id)
+        })
+
+    # Find appropriate snapshot per node
+    result = {}
+    now = datetime.now(timezone.utc)
+
+    for node_id, snapshots in snapshots_by_node.items():
+        # Sort by timestamp descending (newest first)
+        snapshots.sort(key=lambda x: x['timestamp'], reverse=True)
+
+        if lookback_days == 0:
+            # Use most recent snapshot available
+            if len(snapshots) > 0:
+                chosen = snapshots[0]  # Most recent (already sorted descending)
+            else:
+                continue
+        else:
+            # Find snapshot closest to N days ago
+            target_time = now - timedelta(days=lookback_days)
+
+            min_diff = None
+            chosen = None
+            for snap in snapshots:
+                diff = abs((snap['timestamp'] - target_time).total_seconds())
+                if min_diff is None or diff < min_diff:
+                    min_diff = diff
+                    chosen = snap
+
+            if chosen is None:
+                continue
+
+        result[node_id] = {
+            "bytes": chosen['bytes'],
+            "timestamp": chosen['timestamp'],
+            "name": chosen['name']
+        }
+
+    return result
+
+
+def calculate_daily_ingest_rates(
+    current: Dict[str, Dict[str, Any]],
+    historical: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    """Calculate per-node daily ingest rates from snapshots."""
+    results = {}
+
+    for node_id, curr_data in current.items():
+        if node_id not in historical:
+            results[node_id] = {
+                "name": curr_data['name'],
+                "status": "no_historical_data",
+                "daily_gb": 0.0,
+                "period_hours": 0.0
+            }
+            continue
+
+        hist_data = historical[node_id]
+
+        delta_bytes = curr_data['bytes'] - hist_data['bytes']
+        delta_seconds = (curr_data['timestamp'] - hist_data['timestamp']).total_seconds()
+
+        # Handle node restart (counter reset)
+        if delta_bytes < 0:
+            results[node_id] = {
+                "name": curr_data['name'],
+                "status": "counter_reset",
+                "daily_gb": 0.0,
+                "period_hours": 0.0
+            }
+            continue
+
+        # Handle zero time delta (shouldn't happen but defensive)
+        if delta_seconds <= 0:
+            results[node_id] = {
+                "name": curr_data['name'],
+                "status": "invalid_time_delta",
+                "daily_gb": 0.0,
+                "period_hours": 0.0
+            }
+            continue
+
+        # Calculate daily rate by linear extrapolation
+        bytes_per_second = delta_bytes / delta_seconds
+        bytes_per_day = bytes_per_second * 86400
+        daily_gb = bytes_per_day / (1024**3)
+
+        results[node_id] = {
+            "name": curr_data['name'],
+            "status": "ok",
+            "daily_gb": daily_gb,
+            "period_hours": delta_seconds / 3600,
+            "delta_bytes": delta_bytes
+        }
+
+    return results
+
+
+def display_ingest_tracking_results(node_stats: Dict[str, Dict[str, Any]]) -> None:
+    """Print formatted ingest tracking results."""
+    print("3) Ingest pipeline byte tracking (network-level):")
+    print()
+
+    # Filter successful nodes
+    valid_nodes = {nid: data for nid, data in node_stats.items() if data['status'] == 'ok'}
+
+    if not valid_nodes:
+        print("  ⚠ No valid measurements available")
+
+        # Show why each node failed
+        for node_id, data in node_stats.items():
+            if data['status'] == 'no_historical_data':
+                print(f"  • {data['name']}: No historical snapshot (first run?)")
+            elif data['status'] == 'counter_reset':
+                print(f"  • {data['name']}: Node restarted (counter reset detected)")
+            elif data['status'] == 'invalid_time_delta':
+                print(f"  • {data['name']}: Invalid time delta")
+
+        print()
+        print("  ℹ Run script again later after snapshots have been collected.")
+        print()
+        return
+
+    # Per-node results
+    print("  Per-node results:")
+    for node_id, data in valid_nodes.items():
+        # Format period display
+        period_hours = data['period_hours']
+        if period_hours < 1:
+            period_str = f"{period_hours * 60:.1f} minutes"
+        else:
+            period_str = f"{period_hours:.1f} hours"
+
+        print(f"    • {data['name']}")
+        print(f"        Measurement period:  {period_str}")
+        print(f"        Bytes in period:     {data['delta_bytes'] / (1024**3):.2f} GiB")
+        print(f"        Extrapolated daily:  {data['daily_gb']:.2f} GiB/day")
+
+    print()
+
+    # Average per node
+    avg_daily_gb = sum(d['daily_gb'] for d in valid_nodes.values()) / len(valid_nodes)
+    print(f"  Average per node:        {avg_daily_gb:.2f} GiB/day")
+
+    # Total cluster
+    total_daily_gb = sum(d['daily_gb'] for d in valid_nodes.values())
+    print(f"  Total cluster ingest:    {total_daily_gb:.2f} GiB/day")
+    print()
+
+    # Warnings for failed nodes
+    failed_nodes = {nid: data for nid, data in node_stats.items() if data['status'] != 'ok'}
+    if failed_nodes:
+        print("  ⚠ Warnings:")
+        for node_id, data in failed_nodes.items():
+            if data['status'] == 'no_historical_data':
+                print(f"    • {data['name']}: No historical data available")
+            elif data['status'] == 'counter_reset':
+                print(f"    • {data['name']}: Counter reset detected (node restart)")
+        print()
+
+
+# --------------------------------------------------------------------------- #
 # SSH Tunnel Setup                                                            #
 # --------------------------------------------------------------------------- #
 def setup_ssh_tunnel(
@@ -201,6 +539,10 @@ def main() -> None:
     ssh_key = os.getenv('SSH_KEY')
     index_pattern = os.getenv('INDEX_PATTERN')  # Optional: filter to specific indices
 
+    # Ingest pipeline byte tracking configuration
+    track_ingest = os.getenv('TRACK_INGEST_BYTES', '').lower() in ('true', '1', 'yes')
+    ingest_lookback_str = os.getenv('INGEST_LOOKBACK_DAYS', '0')
+
     # Normalize empty string to None for index_pattern
     if index_pattern and not index_pattern.strip():
         index_pattern = None
@@ -214,6 +556,19 @@ def main() -> None:
     except ValueError:
         print(f"ERROR: DAYS_TO_AVERAGE must be a valid integer (got: {days_str})", file=sys.stderr)
         sys.exit(1)
+
+    # Validate ingest lookback days
+    if track_ingest:
+        try:
+            ingest_lookback_days = int(ingest_lookback_str)
+            if ingest_lookback_days < 0 or ingest_lookback_days > 365:
+                print(f"ERROR: INGEST_LOOKBACK_DAYS must be between 0 and 365 (got: {ingest_lookback_days})", file=sys.stderr)
+                sys.exit(1)
+        except ValueError:
+            print(f"ERROR: INGEST_LOOKBACK_DAYS must be a valid integer (got: {ingest_lookback_str})", file=sys.stderr)
+            sys.exit(1)
+    else:
+        ingest_lookback_days = 0
 
     # Validate required Elasticsearch URL
     if not es_url:
@@ -305,6 +660,47 @@ def main() -> None:
         print(f"  Avg docs per day        : {avg_docs_per_day:,.2f}")
         print(f"  Avg ingest per day      : {(avg_bytes_per_day / (1024**3)):,.2f} GiB")
         print()
+
+        # ─────────────────── ingest tracking (optional) ──────────────────────── #
+        if track_ingest:
+            try:
+                # Ensure tracking index exists
+                ensure_ingest_tracking_index(endpoint, auth_tuple, auth_headers)
+
+                # Get current ingest stats
+                current_stats = get_current_ingest_stats(endpoint, auth_tuple, auth_headers)
+
+                # Check if any nodes have ingest data
+                if not current_stats:
+                    print("3) Ingest pipeline byte tracking (network-level):")
+                    print()
+                    print("  ⚠ No ingest data available")
+                    print("  ℹ Either no pipelines exist, or no data has been processed yet.")
+                    print("  ℹ Ingest counters start incrementing once data flows through pipelines.")
+                    print()
+                    raise ValueError("No ingest byte data available")
+
+                # Get historical snapshots for comparison BEFORE storing current
+                historical_stats = get_historical_snapshots(
+                    endpoint, auth_tuple, auth_headers, ingest_lookback_days
+                )
+
+                # Store current snapshot AFTER querying historical
+                store_ingest_snapshots(endpoint, auth_tuple, auth_headers, current_stats)
+
+                # Calculate daily rates
+                node_rates = calculate_daily_ingest_rates(current_stats, historical_stats)
+
+                # Display results
+                display_ingest_tracking_results(node_rates)
+
+            except ValueError as val_exc:
+                # Already printed user-friendly message, just skip
+                pass
+            except Exception as ingest_exc:
+                print(f"⚠ Ingest tracking failed: {ingest_exc}", file=sys.stderr)
+                print("  (Continuing with disk-based statistics only)", file=sys.stderr)
+                print()
 
     except requests.exceptions.RequestException as exc:
         print(f"HTTP error: {exc}", file=sys.stderr)
