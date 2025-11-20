@@ -27,7 +27,7 @@ Configuration:
     # OR
     SSH_KEY=/path/to/key
 
-    # Optional - Index pattern filter
+    # Optional - Index pattern filter (disk-based measurement)
     INDEX_PATTERN=logs-endpoint*
     # If not set or empty, analyzes all indices
 
@@ -42,10 +42,16 @@ Configuration:
     # When 0 or not set: uses most recent snapshot (default)
     # Valid range: 0-365
 
+    # Optional - Pipeline pattern filter (network-level measurement only)
+    PIPELINE_PATTERN=logs-*
+    # If not set or empty, includes all pipelines
+    # Supports wildcards: logs-* matches logs-endpoint, logs-network, etc.
+
 Usage:
     python3 elastic_ingest_per_day.py
 """
 
+import fnmatch
 import os
 import re
 import sys
@@ -171,7 +177,8 @@ def ensure_ingest_tracking_index(
                 "timestamp": {"type": "date"},
                 "node_id": {"type": "keyword"},
                 "node_name": {"type": "keyword"},
-                "ingest_bytes": {"type": "long"}
+                "ingest_bytes": {"type": "long"},
+                "pipeline_pattern": {"type": "keyword"}
             }
         }
     }
@@ -184,12 +191,19 @@ def get_current_ingest_stats(
     endpoint: str,
     auth: Optional[Tuple[str, str]] = None,
     headers: Optional[dict] = None,
+    pipeline_pattern: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Query current ingest byte counters from all nodes.
 
-    Sums ingested_as_first_pipeline_in_bytes across all pipelines per node.
+    Sums ingested_as_first_pipeline_in_bytes across matching pipelines per node.
     This represents bytes received by Elasticsearch before any processing.
+
+    Args:
+        endpoint: Elasticsearch endpoint URL
+        auth: Optional basic auth tuple (user, pass)
+        headers: Optional headers dict for API key auth
+        pipeline_pattern: Optional wildcard pattern to filter pipelines (e.g., 'logs-*')
     """
     url = f"{endpoint.rstrip('/')}/_nodes/stats/ingest"
     resp = requests.get(url, auth=auth, headers=headers, verify=False, timeout=20)
@@ -209,9 +223,13 @@ def get_current_ingest_stats(
         if not pipelines:
             continue
 
-        # Sum ingested bytes across all pipelines
+        # Sum ingested bytes across matching pipelines
         total_ingested_bytes = 0
         for pipeline_name, pipeline_data in pipelines.items():
+            # Filter by pattern if specified
+            if pipeline_pattern and not fnmatch.fnmatch(pipeline_name, pipeline_pattern):
+                continue
+
             ingested_bytes = pipeline_data.get('ingested_as_first_pipeline_in_bytes', 0)
             total_ingested_bytes += ingested_bytes
 
@@ -232,6 +250,7 @@ def store_ingest_snapshots(
     auth: Optional[Tuple[str, str]] = None,
     headers: Optional[dict] = None,
     snapshots: Dict[str, Dict[str, Any]] = None,
+    pipeline_pattern: Optional[str] = None,
 ) -> None:
     """Store current snapshots in tracking index."""
     if not snapshots:
@@ -248,7 +267,8 @@ def store_ingest_snapshots(
             "timestamp": data['timestamp'].strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z',
             "node_id": node_id,
             "node_name": data['name'],
-            "ingest_bytes": data['bytes']
+            "ingest_bytes": data['bytes'],
+            "pipeline_pattern": pipeline_pattern or "_all"
         }
         bulk_lines.append(requests.compat.json.dumps(action))
         bulk_lines.append(requests.compat.json.dumps(doc))
@@ -277,15 +297,22 @@ def get_historical_snapshots(
     auth: Optional[Tuple[str, str]] = None,
     headers: Optional[dict] = None,
     lookback_days: int = 0,
+    pipeline_pattern: Optional[str] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Retrieve historical snapshots for comparison."""
     url = f"{endpoint.rstrip('/')}/{INDEX_NAME}/_search"
 
-    # Query all snapshots
+    # Query snapshots matching the same pipeline pattern
+    # Use .keyword subfield for exact matching on pipeline_pattern
+    pattern_value = pipeline_pattern or "_all"
     query = {
         "size": 10000,
         "sort": [{"timestamp": "desc"}],
-        "query": {"match_all": {}}
+        "query": {
+            "term": {
+                "pipeline_pattern.keyword": pattern_value
+            }
+        }
     }
 
     resp = requests.post(url, json=query, auth=auth, headers=headers, verify=False, timeout=20)
@@ -408,10 +435,17 @@ def calculate_daily_ingest_rates(
     return results
 
 
-def display_ingest_tracking_results(node_stats: Dict[str, Dict[str, Any]]) -> None:
+def display_ingest_tracking_results(
+    node_stats: Dict[str, Dict[str, Any]],
+    pipeline_pattern: Optional[str] = None
+) -> None:
     """Print formatted ingest tracking results."""
     print("3) Ingest pipeline byte tracking (network-level):")
     print()
+
+    if pipeline_pattern:
+        print(f"  Pipeline pattern: {pipeline_pattern}")
+        print()
 
     # Filter successful nodes
     valid_nodes = {nid: data for nid, data in node_stats.items() if data['status'] == 'ok'}
@@ -542,10 +576,13 @@ def main() -> None:
     # Ingest pipeline byte tracking configuration
     track_ingest = os.getenv('TRACK_INGEST_BYTES', '').lower() in ('true', '1', 'yes')
     ingest_lookback_str = os.getenv('INGEST_LOOKBACK_DAYS', '0')
+    pipeline_pattern = os.getenv('PIPELINE_PATTERN')  # Optional: filter to specific pipelines
 
-    # Normalize empty string to None for index_pattern
+    # Normalize empty strings to None
     if index_pattern and not index_pattern.strip():
         index_pattern = None
+    if pipeline_pattern and not pipeline_pattern.strip():
+        pipeline_pattern = None
 
     # Validate and parse days
     try:
@@ -668,31 +705,36 @@ def main() -> None:
                 ensure_ingest_tracking_index(endpoint, auth_tuple, auth_headers)
 
                 # Get current ingest stats
-                current_stats = get_current_ingest_stats(endpoint, auth_tuple, auth_headers)
+                current_stats = get_current_ingest_stats(
+                    endpoint, auth_tuple, auth_headers, pipeline_pattern
+                )
 
                 # Check if any nodes have ingest data
                 if not current_stats:
                     print("3) Ingest pipeline byte tracking (network-level):")
                     print()
+                    if pipeline_pattern:
+                        print(f"  Pipeline pattern: {pipeline_pattern}")
+                        print()
                     print("  ⚠ No ingest data available")
-                    print("  ℹ Either no pipelines exist, or no data has been processed yet.")
+                    print("  ℹ Either no matching pipelines exist, or no data has been processed yet.")
                     print("  ℹ Ingest counters start incrementing once data flows through pipelines.")
                     print()
                     raise ValueError("No ingest byte data available")
 
                 # Get historical snapshots for comparison BEFORE storing current
                 historical_stats = get_historical_snapshots(
-                    endpoint, auth_tuple, auth_headers, ingest_lookback_days
+                    endpoint, auth_tuple, auth_headers, ingest_lookback_days, pipeline_pattern
                 )
 
                 # Store current snapshot AFTER querying historical
-                store_ingest_snapshots(endpoint, auth_tuple, auth_headers, current_stats)
+                store_ingest_snapshots(endpoint, auth_tuple, auth_headers, current_stats, pipeline_pattern)
 
                 # Calculate daily rates
                 node_rates = calculate_daily_ingest_rates(current_stats, historical_stats)
 
                 # Display results
-                display_ingest_tracking_results(node_rates)
+                display_ingest_tracking_results(node_rates, pipeline_pattern)
 
             except ValueError as val_exc:
                 # Already printed user-friendly message, just skip

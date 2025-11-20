@@ -28,6 +28,7 @@ Tracks actual bytes flowing through Elasticsearch ingest pipelines:
 - Stores snapshots in `ingest-tracking-snapshots` index
 - Calculates daily ingest rate by linear extrapolation between snapshots
 - Provides per-node breakdown and cluster total
+- Supports pipeline filtering with wildcards (e.g., `logs-*`)
 
 **Requirements**:
 - All data must flow through ingest pipelines (configure `pipeline` parameter in Beats, Logstash, or bulk API)
@@ -88,6 +89,11 @@ TRACK_INGEST_BYTES=true
 INGEST_LOOKBACK_DAYS=7
 # 0 = use most recent snapshot
 # N = use snapshot closest to N days ago (valid range: 0-365)
+
+# Pipeline pattern filter (optional)
+PIPELINE_PATTERN=logs-*
+# If not set or empty, includes all pipelines
+# Supports wildcards: logs-* matches logs-endpoint, logs-network, etc.
 ```
 
 **Important**: Ingest tracking requires at least **two snapshots** to calculate rates:
