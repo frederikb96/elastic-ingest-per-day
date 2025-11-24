@@ -9,15 +9,18 @@ A Python script to measure **daily ingest volume in Elasticsearch** using two ap
 
 ### Disk-Based Estimation (Default)
 
-Queries:
-- Total **primary store size** (in bytes)
+Queries (per-index):
+- Primary shard **storage size** (in bytes)
 - Total **document count**
 - Documents ingested over **configurable time window** (default: 7 days)
 
-Computes:
-- Average document size (bytes/doc)
-- Average number of documents per day
-- Average ingest volume per day in GiB
+Computes (per-index, then aggregated):
+- Average document size (bytes/doc) per index
+- Recent documents per day per index
+- Daily ingest volume per index using that index's specific average
+- Sum across all indices for total daily ingest
+
+**Accuracy**: Calculates per-index averages weighted by recent activity, providing more accurate estimates than cluster-wide averaging, especially when indices have different document sizes or varying ingest rates.
 
 **Limitation**: Disk storage is affected by compression (typically 36-99% reduction), deleted documents, and segment merging, making it an approximation of actual network ingested bytes.
 
@@ -75,6 +78,15 @@ To analyze only specific indices matching a pattern:
 # Index Pattern Filter (optional)
 INDEX_PATTERN=logs-endpoint*
 # If not set or empty, analyzes all indices in the cluster
+```
+
+To show detailed per-index breakdown:
+
+```bash
+# Show Per-Index Breakdown (optional, default: false)
+SHOW_PER_INDEX_BREAKDOWN=true
+# Displays detailed statistics for each index
+# Useful for understanding which indices contribute most to daily ingest
 ```
 
 To enable **ingest pipeline byte tracking** (network-level measurement):

@@ -47,6 +47,11 @@ Configuration:
     # If not set or empty, includes all pipelines
     # Supports wildcards: logs-* matches logs-endpoint, logs-network, etc.
 
+    # Optional - Show per-index breakdown in output
+    SHOW_PER_INDEX_BREAKDOWN=true
+    # If set to true, displays detailed statistics for each index
+    # Default: false (shows only aggregated totals)
+
 Usage:
     python3 elastic_ingest_per_day.py
 """
@@ -149,6 +154,132 @@ def get_docs_last_nd(
     )
     resp.raise_for_status()
     return resp.json()["count"]
+
+
+def get_per_index_stats(
+    endpoint: str,
+    auth: Optional[Tuple[str, str]] = None,
+    headers: Optional[dict] = None,
+    index_pattern: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Get per-index statistics: storage bytes, doc count, and avg bytes per doc.
+
+    Returns:
+        Dict mapping index_name -> {
+            'bytes': int,
+            'docs': int,
+            'avg_bytes_per_doc': float
+        }
+    """
+    # Build URL with optional index pattern
+    if index_pattern:
+        url = f"{endpoint.rstrip('/')}/{index_pattern}/_stats/store,docs"
+    else:
+        url = f"{endpoint.rstrip('/')}/_stats/store,docs"
+
+    params = {"filter_path": "indices.*.primaries"}
+    resp = requests.get(url, params=params, auth=auth, headers=headers, timeout=30, verify=False)
+    resp.raise_for_status()
+
+    result = {}
+    indices_data = resp.json().get('indices', {})
+
+    for index_name, index_stats in indices_data.items():
+        primaries = index_stats.get('primaries', {})
+        store_bytes = primaries.get('store', {}).get('size_in_bytes', 0)
+        doc_count = primaries.get('docs', {}).get('count', 0)
+
+        # Skip indices with no documents
+        if doc_count == 0:
+            continue
+
+        avg_bytes_per_doc = store_bytes / doc_count if doc_count > 0 else 0
+
+        result[index_name] = {
+            'bytes': store_bytes,
+            'docs': doc_count,
+            'avg_bytes_per_doc': avg_bytes_per_doc
+        }
+
+    return result
+
+
+def get_per_index_recent_docs(
+    endpoint: str,
+    days: int,
+    index_names: List[str],
+    auth: Optional[Tuple[str, str]] = None,
+    headers: Optional[dict] = None,
+    timestamp_field: str = "@timestamp",
+    index_pattern: Optional[str] = None,
+) -> Dict[str, int]:
+    """
+    Get recent document counts for each index using aggregation.
+
+    Uses a single query with terms aggregation to get counts for all indices
+    efficiently instead of querying each index individually.
+
+    Returns:
+        Dict mapping index_name -> recent_doc_count
+    """
+    if not index_names:
+        return {}
+
+    # Use pattern or _all to avoid URL length limits
+    if index_pattern:
+        url = f"{endpoint.rstrip('/')}/{index_pattern}/_search"
+    else:
+        url = f"{endpoint.rstrip('/')}/_all/_search"
+
+    # Use terms aggregation on _index field to get per-index counts
+    query = {
+        "size": 0,  # We don't need documents, just aggregation
+        "query": {
+            "range": {
+                timestamp_field: {
+                    "gte": f"now-{days}d/d",
+                    "lt": "now/d",
+                }
+            }
+        },
+        "aggs": {
+            "per_index": {
+                "terms": {
+                    "field": "_index",
+                    "size": 10000  # Get up to 10k indices
+                }
+            }
+        }
+    }
+
+    try:
+        resp = requests.post(
+            url, json=query,
+            auth=auth, headers=headers, timeout=60, verify=False
+        )
+        resp.raise_for_status()
+
+        result = {name: 0 for name in index_names}  # Initialize with 0s
+
+        resp_json = resp.json()
+
+        # Parse aggregation results
+        agg_data = resp_json.get('aggregations', {}).get('per_index', {}).get('buckets', [])
+
+        for bucket in agg_data:
+            index_name = bucket['key']
+            doc_count = bucket['doc_count']
+            # Only store results for indices we care about
+            if index_name in result:
+                result[index_name] = doc_count
+
+        return result
+
+    except Exception as e:
+        # If query fails entirely, return 0 for all indices
+        print(f"ERROR: Aggregation query failed: {e}", file=sys.stderr)
+        return {name: 0 for name in index_names}
 
 
 # --------------------------------------------------------------------------- #
@@ -578,6 +709,9 @@ def main() -> None:
     ingest_lookback_str = os.getenv('INGEST_LOOKBACK_DAYS', '0')
     pipeline_pattern = os.getenv('PIPELINE_PATTERN')  # Optional: filter to specific pipelines
 
+    # Display configuration
+    show_per_index = os.getenv('SHOW_PER_INDEX_BREAKDOWN', '').lower() in ('true', '1', 'yes')
+
     # Normalize empty strings to None
     if index_pattern and not index_pattern.strip():
         index_pattern = None
@@ -672,15 +806,37 @@ def main() -> None:
             # Modify endpoint to use tunnel
             endpoint = f"{parsed.scheme}://localhost:{local_port}"
 
-        # cluster-wide store + doc metrics (optionally filtered by index pattern)
-        total_bytes = get_primary_store_bytes(endpoint, auth_tuple, auth_headers, index_pattern)
-        total_docs = get_total_docs(endpoint, auth_tuple, auth_headers, index_pattern)
+        # Per-index statistics (storage, docs, avg bytes per doc)
+        per_index_stats = get_per_index_stats(endpoint, auth_tuple, auth_headers, index_pattern)
+
+        # Per-index recent document counts
+        index_names = list(per_index_stats.keys())
+        per_index_recent_docs = get_per_index_recent_docs(
+            endpoint, days, index_names, auth_tuple, auth_headers,
+            index_pattern=index_pattern
+        )
+
+        # Calculate per-index daily ingest volumes
+        per_index_daily_bytes = {}
+        for index_name in index_names:
+            recent_docs = per_index_recent_docs.get(index_name, 0)
+            avg_bytes = per_index_stats[index_name]['avg_bytes_per_doc']
+            daily_docs = recent_docs / days
+            daily_bytes = daily_docs * avg_bytes
+            per_index_daily_bytes[index_name] = {
+                'recent_docs': recent_docs,
+                'daily_docs': daily_docs,
+                'daily_bytes': daily_bytes
+            }
+
+        # Aggregate totals for display
+        total_bytes = sum(stats['bytes'] for stats in per_index_stats.values())
+        total_docs = sum(stats['docs'] for stats in per_index_stats.values())
         avg_bytes_per_doc = total_bytes / total_docs if total_docs else 0
 
-        # past N days metrics (optionally filtered by index pattern)
-        docs_last_days = get_docs_last_nd(endpoint, days, auth_tuple, auth_headers, index_pattern=index_pattern or "_all")
+        docs_last_days = sum(per_index_recent_docs.values())
         avg_docs_per_day = docs_last_days / days
-        avg_bytes_per_day = avg_docs_per_day * avg_bytes_per_doc
+        avg_bytes_per_day = sum(data['daily_bytes'] for data in per_index_daily_bytes.values())
 
         # ────────────────────────────── output ───────────────────────────── #
         print()
@@ -697,6 +853,29 @@ def main() -> None:
         print(f"  Avg docs per day        : {avg_docs_per_day:,.2f}")
         print(f"  Avg ingest per day      : {(avg_bytes_per_day / (1024**3)):,.2f} GiB")
         print()
+
+        # ─────────────── per-index breakdown (optional) ──────────────────────── #
+        if show_per_index:
+            print("Per-index breakdown:")
+            print()
+
+            # Sort indices by daily bytes (descending)
+            sorted_indices = sorted(
+                per_index_daily_bytes.items(),
+                key=lambda x: x[1]['daily_bytes'],
+                reverse=True
+            )
+
+            for index_name, daily_data in sorted_indices:
+                index_stats = per_index_stats[index_name]
+                print(f"  {index_name}")
+                print(f"    Total storage           : {(index_stats['bytes'] / (1024**3)):,.2f} GiB")
+                print(f"    Total documents         : {index_stats['docs']:,}")
+                print(f"    Avg bytes per doc       : {index_stats['avg_bytes_per_doc']:,.2f} Bytes")
+                print(f"    Recent docs ({days}d)      : {daily_data['recent_docs']:,}")
+                print(f"    Avg docs per day        : {daily_data['daily_docs']:,.2f}")
+                print(f"    Avg ingest per day      : {(daily_data['daily_bytes'] / (1024**3)):,.2f} GiB")
+                print()
 
         # ─────────────────── ingest tracking (optional) ──────────────────────── #
         if track_ingest:
