@@ -58,6 +58,8 @@ ES_API_KEY=your_base64_encoded_api_key
 
 # Time window for averaging (optional, default: 7)
 DAYS_TO_AVERAGE=7  # Valid range: 1-365
+# Uses exact 24-hour multiples from current time
+# e.g., DAYS_TO_AVERAGE=1 at 3pm = 3pm yesterday to 3pm today
 ```
 
 For clusters behind an SSH jumphost, add SSH configuration:

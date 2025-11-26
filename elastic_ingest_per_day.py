@@ -19,6 +19,7 @@ Configuration:
 
     # Optional - Time window for average calculation
     DAYS_TO_AVERAGE=7  # Default: 7 days (valid range: 1-365)
+    # Uses exact 24-hour multiples from current time (not day boundaries)
 
     # Optional - SSH jumphost configuration
     SSH_USER=sshuser
@@ -135,16 +136,16 @@ def get_docs_last_nd(
 ) -> int:
     """
     Count documents with `timestamp_field` in the range:
-        (now-{days}d, now) – *rounded to day boundaries*
-    Equivalent Kibana KQL:  @timestamp >= now-{days}d/d and @timestamp <  now/d
+        [now - (days * 24h), now]
+    Uses exact 24-hour multiples from current time (no day boundary rounding).
     """
     url = f"{endpoint.rstrip('/')}/{index_pattern}/_count"
     query = {
         "query": {
             "range": {
                 timestamp_field: {
-                    "gte": f"now-{days}d/d",
-                    "lt": "now/d",
+                    "gte": f"now-{days}d",
+                    "lte": "now",
                 }
             }
         }
@@ -233,13 +234,14 @@ def get_per_index_recent_docs(
         url = f"{endpoint.rstrip('/')}/_all/_search"
 
     # Use terms aggregation on _index field to get per-index counts
+    # Uses exact 24-hour multiples from current time (no day boundary rounding)
     query = {
         "size": 0,  # We don't need documents, just aggregation
         "query": {
             "range": {
                 timestamp_field: {
-                    "gte": f"now-{days}d/d",
-                    "lt": "now/d",
+                    "gte": f"now-{days}d",
+                    "lte": "now",
                 }
             }
         },
