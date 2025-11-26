@@ -56,10 +56,9 @@ ES_PASS=mypassword
 # Method 2: API key authentication
 ES_API_KEY=your_base64_encoded_api_key
 
-# Time window for averaging (optional, default: 7)
-DAYS_TO_AVERAGE=7  # Valid range: 1-365
-# Uses exact 24-hour multiples from current time
-# e.g., DAYS_TO_AVERAGE=1 at 3pm = 3pm yesterday to 3pm today
+# Time window for averaging (optional, default: 7d)
+TIME_WINDOW=7d  # Supports: Nd (days), Nh (hours), Nm (minutes)
+# Examples: 7d, 24h, 30m - uses exact time from current moment
 ```
 
 For clusters behind an SSH jumphost, add SSH configuration:
@@ -159,7 +158,7 @@ Total primary storage     : 82.25 GiB
 Total document count      : 186,617,606
 Average bytes per doc     : 473.25 Bytes
 
-2) Last 7 days statistics:
+2) Time window statistics (7d):
   Documents ingested      : 122,196,371
   Avg docs per day        : 17,456,624.43
   Avg ingest per day      : 7.69 GiB

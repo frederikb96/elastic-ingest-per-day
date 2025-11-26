@@ -18,8 +18,8 @@ Configuration:
     ES_API_KEY=your_base64_encoded_api_key
 
     # Optional - Time window for average calculation
-    DAYS_TO_AVERAGE=7  # Default: 7 days (valid range: 1-365)
-    # Uses exact 24-hour multiples from current time (not day boundaries)
+    TIME_WINDOW=7d  # Default: 7d (supports: Nd, Nh, Nm for days/hours/minutes)
+    # Uses exact time from current moment (not day boundaries)
 
     # Optional - SSH jumphost configuration
     SSH_USER=sshuser
@@ -76,6 +76,52 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 load_dotenv()
 
 
+def parse_time_window(value: str) -> Tuple[str, float]:
+    """
+    Parse time window string like '7d', '24h', '30m'.
+
+    Returns:
+        Tuple of (es_expr, days_float):
+        - es_expr: Elasticsearch date math expression (e.g., '7d', '24h')
+        - days_float: Value converted to days for averaging calculations
+    """
+    value = value.strip().lower()
+    match = re.match(r'^(\d+)([dhm])$', value)
+
+    if not match:
+        raise ValueError(
+            f"Invalid TIME_WINDOW format: '{value}'. "
+            "Expected format: Nd, Nh, or Nm (e.g., 7d, 24h, 30m)"
+        )
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+
+    if amount < 1:
+        raise ValueError(f"TIME_WINDOW amount must be at least 1 (got: {amount})")
+
+    # Convert to days for averaging calculations
+    if unit == 'd':
+        days_float = float(amount)
+        max_val = 365
+    elif unit == 'h':
+        days_float = amount / 24.0
+        max_val = 365 * 24  # ~8760 hours
+    elif unit == 'm':
+        days_float = amount / (24.0 * 60)
+        max_val = 365 * 24 * 60  # ~525600 minutes
+    else:
+        raise ValueError(f"Unknown time unit: {unit}")
+
+    if amount > max_val:
+        raise ValueError(f"TIME_WINDOW too large: {amount}{unit} (max: {max_val}{unit})")
+
+    # ES expression uses the original format
+    es_expr = f"{amount}{unit}"
+
+    return es_expr, days_float
+
+
 def get_primary_store_bytes(
     endpoint: str,
     auth: Optional[Tuple[str, str]] = None,
@@ -128,23 +174,24 @@ def get_total_docs(
 
 def get_docs_last_nd(
     endpoint: str,
-    days: int,
+    time_window: str,
     auth: Optional[Tuple[str, str]] = None,
     headers: Optional[dict] = None,
     timestamp_field: str = "@timestamp",
     index_pattern: str = "_all",
 ) -> int:
     """
-    Count documents with `timestamp_field` in the range:
-        [now - (days * 24h), now]
-    Uses exact 24-hour multiples from current time (no day boundary rounding).
+    Count documents with `timestamp_field` in the specified time window.
+
+    Args:
+        time_window: Elasticsearch date math expression (e.g., '7d', '24h', '30m')
     """
     url = f"{endpoint.rstrip('/')}/{index_pattern}/_count"
     query = {
         "query": {
             "range": {
                 timestamp_field: {
-                    "gte": f"now-{days}d",
+                    "gte": f"now-{time_window}",
                     "lte": "now",
                 }
             }
@@ -208,7 +255,7 @@ def get_per_index_stats(
 
 def get_per_index_recent_docs(
     endpoint: str,
-    days: int,
+    time_window: str,
     index_names: List[str],
     auth: Optional[Tuple[str, str]] = None,
     headers: Optional[dict] = None,
@@ -220,6 +267,9 @@ def get_per_index_recent_docs(
 
     Uses a single query with terms aggregation to get counts for all indices
     efficiently instead of querying each index individually.
+
+    Args:
+        time_window: Elasticsearch date math expression (e.g., '7d', '24h', '30m')
 
     Returns:
         Dict mapping index_name -> recent_doc_count
@@ -234,13 +284,12 @@ def get_per_index_recent_docs(
         url = f"{endpoint.rstrip('/')}/_all/_search"
 
     # Use terms aggregation on _index field to get per-index counts
-    # Uses exact 24-hour multiples from current time (no day boundary rounding)
     query = {
         "size": 0,  # We don't need documents, just aggregation
         "query": {
             "range": {
                 timestamp_field: {
-                    "gte": f"now-{days}d",
+                    "gte": f"now-{time_window}",
                     "lte": "now",
                 }
             }
@@ -699,7 +748,7 @@ def main() -> None:
     es_user = os.getenv('ES_USER')
     es_pass = os.getenv('ES_PASS')
     es_api_key = os.getenv('ES_API_KEY')
-    days_str = os.getenv('DAYS_TO_AVERAGE', '7')
+    time_window_str = os.getenv('TIME_WINDOW', '7d')
     ssh_user = os.getenv('SSH_USER')
     ssh_host = os.getenv('SSH_HOST')
     ssh_pass = os.getenv('SSH_PASS')
@@ -720,14 +769,11 @@ def main() -> None:
     if pipeline_pattern and not pipeline_pattern.strip():
         pipeline_pattern = None
 
-    # Validate and parse days
+    # Validate and parse time window
     try:
-        days = int(days_str)
-        if days < 1 or days > 365:
-            print(f"ERROR: DAYS_TO_AVERAGE must be between 1 and 365 (got: {days})", file=sys.stderr)
-            sys.exit(1)
-    except ValueError:
-        print(f"ERROR: DAYS_TO_AVERAGE must be a valid integer (got: {days_str})", file=sys.stderr)
+        time_window, days_float = parse_time_window(time_window_str)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Validate ingest lookback days
@@ -814,7 +860,7 @@ def main() -> None:
         # Per-index recent document counts
         index_names = list(per_index_stats.keys())
         per_index_recent_docs = get_per_index_recent_docs(
-            endpoint, days, index_names, auth_tuple, auth_headers,
+            endpoint, time_window, index_names, auth_tuple, auth_headers,
             index_pattern=index_pattern
         )
 
@@ -823,7 +869,7 @@ def main() -> None:
         for index_name in index_names:
             recent_docs = per_index_recent_docs.get(index_name, 0)
             avg_bytes = per_index_stats[index_name]['avg_bytes_per_doc']
-            daily_docs = recent_docs / days
+            daily_docs = recent_docs / days_float
             daily_bytes = daily_docs * avg_bytes
             per_index_daily_bytes[index_name] = {
                 'recent_docs': recent_docs,
@@ -836,8 +882,8 @@ def main() -> None:
         total_docs = sum(stats['docs'] for stats in per_index_stats.values())
         avg_bytes_per_doc = total_bytes / total_docs if total_docs else 0
 
-        docs_last_days = sum(per_index_recent_docs.values())
-        avg_docs_per_day = docs_last_days / days
+        docs_in_window = sum(per_index_recent_docs.values())
+        avg_docs_per_day = docs_in_window / days_float
         avg_bytes_per_day = sum(data['daily_bytes'] for data in per_index_daily_bytes.values())
 
         # ────────────────────────────── output ───────────────────────────── #
@@ -850,8 +896,8 @@ def main() -> None:
         print(f"Total document count      : {total_docs:,}")
         print(f"Average bytes per doc     : {avg_bytes_per_doc:,.2f} Bytes")
         print()
-        print(f"2) Last {days} days statistics:")
-        print(f"  Documents ingested      : {docs_last_days:,}")
+        print(f"2) Time window statistics ({time_window}):")
+        print(f"  Documents ingested      : {docs_in_window:,}")
         print(f"  Avg docs per day        : {avg_docs_per_day:,.2f}")
         print(f"  Avg ingest per day      : {(avg_bytes_per_day / (1024**3)):,.2f} GiB")
         print()
@@ -874,7 +920,7 @@ def main() -> None:
                 print(f"    Total storage           : {(index_stats['bytes'] / (1024**3)):,.2f} GiB")
                 print(f"    Total documents         : {index_stats['docs']:,}")
                 print(f"    Avg bytes per doc       : {index_stats['avg_bytes_per_doc']:,.2f} Bytes")
-                print(f"    Recent docs ({days}d)      : {daily_data['recent_docs']:,}")
+                print(f"    Recent docs ({time_window})    : {daily_data['recent_docs']:,}")
                 print(f"    Avg docs per day        : {daily_data['daily_docs']:,.2f}")
                 print(f"    Avg ingest per day      : {(daily_data['daily_bytes'] / (1024**3)):,.2f} GiB")
                 print()
