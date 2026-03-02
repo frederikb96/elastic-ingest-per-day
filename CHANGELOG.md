@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-03-02
+
+### Added
+
+- PEP 723 inline script metadata for `uv run` support — run directly without cloning or manual dependency setup
+- uv shebang (`#!/usr/bin/env -S uv run --script`) for direct execution with uv
+
 ## [1.1.0] - 2026-03-02
 
 ### Changed

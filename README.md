@@ -49,14 +49,29 @@ The Streams UI uses the same `bytesPerDoc × docsPerDay` formula. This script di
 
 ## Quick Start
 
+Create a `.env` file (see configuration below), then pick one of:
+
+### Option A: uv (recommended)
+
+[uv](https://docs.astral.sh/uv/) is a single binary that replaces pip, venv, pyenv, and pipx. It reads the script's inline dependency metadata, creates an isolated environment behind the scenes, and runs — no manual setup.
+
+**Run directly from a release** — no clone needed:
+
+```bash
+uv run https://raw.githubusercontent.com/frederikb96/elastic-ingest-per-day/v1.2.0/elastic_ingest_per_day.py
+```
+
+**Or locally:**
+
+```bash
+uv run elastic_ingest_per_day.py
+```
+
+### Option B: pip + venv
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip3 install -r requirements.txt
-```
-
-Create a `.env` file (see configuration below), then:
-
-```bash
 python3 elastic_ingest_per_day.py
 ```
 
@@ -108,7 +123,8 @@ Average bytes per doc     : 473.25 Bytes
 
 ## Requirements
 
-- `requests`, `paramiko`, `sshtunnel`, `python-dotenv` (see `requirements.txt`)
+- **uv path:** Dependencies are declared inline in the script (PEP 723) — `uv run` handles everything automatically
+- **pip path:** See `requirements.txt`
 - Self-signed SSL certificates are supported (certificate validation is disabled)
 
 ---

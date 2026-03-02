@@ -1,4 +1,13 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = [
+#   "requests>=2.32.0",
+#   "paramiko>=4.0.0,<4.1.0",
+#   "sshtunnel>=0.4.0",
+#   "python-dotenv>=1.0.0",
+# ]
+# ///
 """
 Elasticsearch Ingest Statistics
 
