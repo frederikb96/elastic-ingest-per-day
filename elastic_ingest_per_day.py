@@ -849,7 +849,7 @@ def main() -> None:
                 remote_port=remote_port,
                 local_port=local_port,
             )
-            print(f"  ✓ SSH tunnel established\n")
+            print("  ✓ SSH tunnel established\n")
 
             # Modify endpoint to use tunnel
             endpoint = f"{parsed.scheme}://localhost:{local_port}"
@@ -963,7 +963,7 @@ def main() -> None:
                 # Display results
                 display_ingest_tracking_results(node_rates, pipeline_pattern)
 
-            except ValueError as val_exc:
+            except ValueError:
                 # Already printed user-friendly message, just skip
                 pass
             except Exception as ingest_exc:

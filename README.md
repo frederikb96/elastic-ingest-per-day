@@ -1,4 +1,19 @@
+<table>
+<tr>
+<td width="140">
+<img src="docs/logo.png" alt="elastic-ingest-per-day" width="120">
+</td>
+<td>
+
 # Elastic Ingest per Day
+
+[![CI](https://github.com/frederikb96/elastic-ingest-per-day/actions/workflows/ci.yaml/badge.svg)](https://github.com/frederikb96/elastic-ingest-per-day/actions/workflows/ci.yaml)
+[![Release](https://img.shields.io/github/v/release/frederikb96/elastic-ingest-per-day)](https://github.com/frederikb96/elastic-ingest-per-day/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
+</td>
+</tr>
+</table>
 
 Estimates daily ingest volume for Elasticsearch clusters. Uses the same formula as Elastic's **Streams UI** (GA in 9.2) — verified against the [Kibana source](https://github.com/elastic/kibana/blob/main/x-pack/platform/plugins/shared/streams_app/public/components/data_management/stream_detail_lifecycle/helpers/get_calculated_stats.ts).
 
