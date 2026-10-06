@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- SSH jumphost tunnel works again: `sshtunnel` is no longer used because it needs `paramiko.DSSKey`, which paramiko 4 and later removed. The local port forward is now implemented with paramiko directly
+
+### Changed
+
+- Bump `paramiko` from v4 to v5 (fixes CVE-2026-44405, SHA-1 RSA signatures)
+- Drop the `sshtunnel` dependency
+- Bump `actions/checkout` from v6 to v7
+- Bump `actions/setup-python` from v6 to v7
+- Bump `softprops/action-gh-release` from v2 to v3
+
 ## [1.2.0] - 2026-03-02
 
 ### Added

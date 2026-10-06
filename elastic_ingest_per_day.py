@@ -3,8 +3,7 @@
 # requires-python = ">=3.10"
 # dependencies = [
 #   "requests>=2.32.0",
-#   "paramiko>=4.0.0,<4.1.0",
-#   "sshtunnel>=0.4.0",
+#   "paramiko>=5.0.0,<6",
 #   "python-dotenv>=1.0.0",
 # ]
 # ///
@@ -69,15 +68,18 @@ Usage:
 import fnmatch
 import os
 import re
+import select
+import socketserver
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple, Dict, List, Any
 from urllib.parse import urlparse
 
+import paramiko
 import requests
 import urllib3
 from dotenv import load_dotenv
-from sshtunnel import SSHTunnelForwarder
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -699,6 +701,58 @@ def display_ingest_tracking_results(
 # --------------------------------------------------------------------------- #
 # SSH Tunnel Setup                                                            #
 # --------------------------------------------------------------------------- #
+class _ForwardHandler(socketserver.BaseRequestHandler):
+    """Pipe one local connection through a direct-tcpip channel of the SSH transport."""
+
+    def handle(self) -> None:
+        server = self.server
+        try:
+            channel = server.transport.open_channel(
+                "direct-tcpip",
+                (server.remote_host, server.remote_port),
+                self.request.getpeername(),
+            )
+        except Exception:
+            return
+        try:
+            while True:
+                readable, _, _ = select.select([self.request, channel], [], [])
+                if self.request in readable:
+                    data = self.request.recv(32768)
+                    if not data:
+                        break
+                    channel.sendall(data)
+                if channel in readable:
+                    data = channel.recv(32768)
+                    if not data:
+                        break
+                    self.request.sendall(data)
+        finally:
+            channel.close()
+
+
+class _ForwardServer(socketserver.ThreadingTCPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class SSHTunnel:
+    """Local port forward to remote_host:remote_port through an SSH jumphost."""
+
+    def __init__(self, client: paramiko.SSHClient, server: _ForwardServer) -> None:
+        self._client = client
+        self._server = server
+        self._thread = threading.Thread(target=server.serve_forever, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._client.close()
+
+
 def setup_ssh_tunnel(
     ssh_host: str,
     ssh_user: str,
@@ -707,45 +761,41 @@ def setup_ssh_tunnel(
     remote_host: str,
     remote_port: int,
     local_port: int = 19200,
-) -> SSHTunnelForwarder:
+) -> SSHTunnel:
     """
     Create SSH tunnel through jumphost.
-    Returns SSHTunnelForwarder object.
+    Returns a started SSHTunnel object.
 
-    Important: Disables SSH agent and key directories to prevent "Too many authentication
+    Important: Disables SSH agent and default key lookup to prevent "Too many authentication
     failures" errors when user has many SSH keys. Uses only the specified auth method.
     """
-    if ssh_pass:
-        # Password authentication: disable all key-based auth
-        tunnel = SSHTunnelForwarder(
-            ssh_host,
-            ssh_username=ssh_user,
-            ssh_password=ssh_pass,
-            remote_bind_address=(remote_host, remote_port),
-            local_bind_address=("127.0.0.1", local_port),
-            allow_agent=False,
-            host_pkey_directories=[],
-        )
-    elif ssh_key:
-        # Key authentication: use only the specified key
-        tunnel = SSHTunnelForwarder(
-            ssh_host,
-            ssh_username=ssh_user,
-            ssh_pkey=ssh_key,
-            remote_bind_address=(remote_host, remote_port),
-            local_bind_address=("127.0.0.1", local_port),
-            allow_agent=False,
-            host_pkey_directories=[],
-        )
-    else:
+    if not ssh_pass and not ssh_key:
         raise ValueError("Either --ssh-pass or --ssh-key must be provided for SSH authentication")
 
+    client = paramiko.SSHClient()
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     try:
-        tunnel.start()
-        return tunnel
+        client.connect(
+            ssh_host,
+            username=ssh_user,
+            password=ssh_pass or None,
+            key_filename=None if ssh_pass else ssh_key,
+            allow_agent=False,
+            look_for_keys=False,
+        )
+        server = _ForwardServer(("127.0.0.1", local_port), _ForwardHandler)
     except Exception as e:
+        client.close()
         print(f"✗ SSH tunnel failed: {type(e).__name__}: {e}", file=sys.stderr)
         raise
+    server.transport = client.get_transport()
+    server.remote_host = remote_host
+    server.remote_port = remote_port
+
+    tunnel = SSHTunnel(client, server)
+    tunnel.start()
+    return tunnel
 
 
 # --------------------------------------------------------------------------- #
@@ -835,7 +885,7 @@ def main() -> None:
             print("ERROR: Either SSH_PASS or SSH_KEY must be set in .env", file=sys.stderr)
             sys.exit(1)
 
-    tunnel: Optional[SSHTunnelForwarder] = None
+    tunnel: Optional[SSHTunnel] = None
     endpoint = es_url
 
     try:
