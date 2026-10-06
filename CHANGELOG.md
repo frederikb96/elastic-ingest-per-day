@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-10-06
+
 ### Fixed
 
 - SSH jumphost tunnel works again: `sshtunnel` is no longer used because it needs `paramiko.DSSKey`, which paramiko 4 and later removed. The local port forward is now implemented with paramiko directly

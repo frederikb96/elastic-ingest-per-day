@@ -58,7 +58,7 @@ Create a `.env` file (see configuration below), then pick one of:
 **Run directly from a release** — no clone needed:
 
 ```bash
-uv run https://raw.githubusercontent.com/frederikb96/elastic-ingest-per-day/v1.2.0/elastic_ingest_per_day.py
+uv run https://raw.githubusercontent.com/frederikb96/elastic-ingest-per-day/v1.2.1/elastic_ingest_per_day.py
 ```
 
 **Or locally:**
