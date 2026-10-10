@@ -144,3 +144,14 @@ PIPELINE_PATTERN=logs-*
 ```
 
 Requires at least two runs — the first run stores a baseline snapshot, subsequent runs calculate rates by comparing against historical snapshots.
+
+## Development
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt ruff
+ruff check elastic_ingest_per_day.py
+python -m py_compile elastic_ingest_per_day.py
+```
+
+Dependencies are declared twice and must stay in sync: the PEP 723 block in the script (for `uv run`) and `requirements.txt` (for pip). Pull requests run the lint and syntax check in CI.
