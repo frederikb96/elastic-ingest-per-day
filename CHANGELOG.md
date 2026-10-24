@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- CI also tests Python 3.15, and the release workflow runs on 3.15
+
 ## [1.2.1] - 2026-10-06
 
 ### Fixed
